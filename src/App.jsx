@@ -890,7 +890,7 @@ export default function App() {
       <div className="app">
         <div className="header">
           <div>
-            <div className="header-title">🩺 Plantões</div>
+            <div className="header-title">🌱 MikaPlantões</div>
             <div className="header-sub">seu controle financeiro de plantões</div>
           </div>
         </div>
