@@ -104,7 +104,7 @@ function googleCalendarUrl(title, dateIso, description) {
 //   3. Crie credenciais OAuth 2.0 → Aplicativo da Web
 //   4. Em "Origens JS autorizadas" coloque a URL onde roda esse app
 //   5. Cole o Client ID abaixo
-const GOOGLE_CLIENT_ID = "954449084376-dl0s0phihikuepcj47f8us18i0o1m4ug.apps.googleusercontent.com"; // ← cole seu Client ID aqui
+const GOOGLE_CLIENT_ID = "954449084376-dl0s0phihikuepcj47f8us18i0o1m4ug.apps.googleusercontent.com";
 
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file";
 
@@ -131,7 +131,7 @@ function loginWithGoogle() {
       reject(new Error("CLIENT_ID_MISSING"));
       return;
     }
-    const redirectUri = window.location.origin + window.location.pathname;
+    const redirectUri = (window.location.origin + window.location.pathname).replace(/\/$/, "");
     const state = Math.random().toString(36).slice(2);
     sessionStorage.setItem("gsheets_oauth_state", state);
     const params = new URLSearchParams({
@@ -174,30 +174,111 @@ async function ensureToken() {
   return await loginWithGoogle();
 }
 
+const SPREADSHEET_NAME = "🩺 Plantões";
+const SPREADSHEET_ID_KEY = "gsheets_spreadsheet_id";
+
+async function findOrCreateSpreadsheet(token) {
+  // Tenta usar o ID salvo localmente
+  const savedId = localStorage.getItem(SPREADSHEET_ID_KEY);
+  if (savedId) {
+    // Verifica se ainda existe
+    const check = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${savedId}?fields=spreadsheetId`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (check.ok) return savedId;
+    // Se não existe mais, remove o ID salvo e cria uma nova
+    localStorage.removeItem(SPREADSHEET_ID_KEY);
+  }
+
+  // Busca no Drive por uma planilha com esse nome
+  const searchRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=name='${SPREADSHEET_NAME}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false&fields=files(id,name)`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const searchData = await searchRes.json();
+  if (searchData.files && searchData.files.length > 0) {
+    const id = searchData.files[0].id;
+    localStorage.setItem(SPREADSHEET_ID_KEY, id);
+    return id;
+  }
+
+  // Não existe — cria nova planilha
+  const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ properties: { title: SPREADSHEET_NAME } }),
+  });
+  if (!createRes.ok) {
+    const err = await createRes.json();
+    throw new Error(err.error?.message || "Erro ao criar planilha");
+  }
+  const created = await createRes.json();
+  localStorage.setItem(SPREADSHEET_ID_KEY, created.spreadsheetId);
+  return created.spreadsheetId;
+}
+
 async function exportToSheets(shifts, hospitals, year, month) {
   const token = await ensureToken();
-  const sheetTitle = `Plantões — ${new Date(year, month, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" })}`;
+  const tabName = new Date(year, month, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  // Capitaliza primeira letra
+  const tabTitle = tabName.charAt(0).toUpperCase() + tabName.slice(1);
 
-  // Filtra plantões do mês
+  const spreadsheetId = await findOrCreateSpreadsheet(token);
+
+  // Busca abas existentes
+  const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const meta = await metaRes.json();
+  const existingSheets = meta.sheets || [];
+  const existingTab = existingSheets.find(s => s.properties.title === tabTitle);
+
+  let tabSheetId;
+
+  if (existingTab) {
+    // Aba já existe — limpa o conteúdo pra reescrever atualizado
+    tabSheetId = existingTab.properties.sheetId;
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabTitle)}:clear`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } else {
+    // Cria nova aba
+    const addRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [{ addSheet: { properties: { title: tabTitle } } }],
+      }),
+    });
+    const addData = await addRes.json();
+    tabSheetId = addData.replies[0].addSheet.properties.sheetId;
+
+    // Remove a aba padrão "Plan1" se for a única aba original
+    const defaultSheet = existingSheets.find(s => s.properties.title === "Plan1" || s.properties.title === "Sheet1" || s.properties.title === "Página1");
+    if (defaultSheet && existingSheets.length === 1) {
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: [{ deleteSheet: { sheetId: defaultSheet.properties.sheetId } }] }),
+      });
+    }
+  }
+
+  // Monta os dados
+  const hospital = (id) => hospitals.find((h) => h.id === id) || { name: id, emoji: "" };
   const monthShifts = shifts
-    .filter((sh) => {
-      const d = new Date(sh.date + "T12:00:00");
-      return d.getFullYear() === year && d.getMonth() === month;
-    })
+    .filter((sh) => { const d = new Date(sh.date + "T12:00:00"); return d.getFullYear() === year && d.getMonth() === month; })
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  const hospital = (id) => hospitals.find((h) => h.id === id) || { name: id, emoji: "" };
-
-  // Monta linhas
   const header = [["Data", "Dia da Semana", "Hospital", "Horas", "Valor (R$)", "Data Pagamento", "Status"]];
   const rows = monthShifts.map((sh) => {
     const h = hospital(sh.hospitalId);
     const d = new Date(sh.date + "T12:00:00");
-    const dayName = WEEKDAYS[d.getDay()];
     const payDate = calcPaymentDate(sh.date, h);
     return [
       fmtDate(sh.date),
-      dayName,
+      WEEKDAYS[d.getDay()],
       `${h.emoji} ${h.name}`,
       sh.hours ?? SHIFT_HOURS,
       sh.value,
@@ -206,28 +287,12 @@ async function exportToSheets(shifts, hospitals, year, month) {
     ];
   });
 
-  // Linha de total
   const total = monthShifts.reduce((a, s) => a + (s.value || 0), 0);
-  const totalRow = [["", "", "TOTAL", "", total, "", ""]];
+  const values = [...header, ...rows, [""], ["", "", "TOTAL", "", total, "", ""]];
 
-  const values = [...header, ...rows, [""], ...totalRow];
-
-  // 1. Cria a planilha
-  const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ properties: { title: sheetTitle } }),
-  });
-  if (!createRes.ok) {
-    const err = await createRes.json();
-    throw new Error(err.error?.message || "Erro ao criar planilha");
-  }
-  const sheet = await createRes.json();
-  const spreadsheetId = sheet.spreadsheetId;
-
-  // 2. Preenche os dados
+  // Escreve os dados na aba
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabTitle)}!A1?valueInputOption=USER_ENTERED`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -235,37 +300,34 @@ async function exportToSheets(shifts, hospitals, year, month) {
     }
   );
 
-  // 3. Formata: negrito no header, cor de fundo, largura das colunas
-  const requests = [
-    // Header em negrito + fundo roxo
-    {
-      repeatCell: {
-        range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1 },
-        cell: {
-          userEnteredFormat: {
-            backgroundColor: { red: 0.49, green: 0.42, blue: 0.97 },
-            textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
-          },
-        },
-        fields: "userEnteredFormat(backgroundColor,textFormat)",
-      },
-    },
-    // Linha de total em negrito
-    {
-      repeatCell: {
-        range: { sheetId: 0, startRowIndex: rows.length + 2, endRowIndex: rows.length + 3 },
-        cell: { userEnteredFormat: { textFormat: { bold: true } } },
-        fields: "userEnteredFormat(textFormat)",
-      },
-    },
-    // Auto-resize
-    { autoResizeDimensions: { dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: 7 } } },
-  ];
-
+  // Formata
   await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ requests }),
+    body: JSON.stringify({
+      requests: [
+        {
+          repeatCell: {
+            range: { sheetId: tabSheetId, startRowIndex: 0, endRowIndex: 1 },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.49, green: 0.42, blue: 0.97 },
+                textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+              },
+            },
+            fields: "userEnteredFormat(backgroundColor,textFormat)",
+          },
+        },
+        {
+          repeatCell: {
+            range: { sheetId: tabSheetId, startRowIndex: rows.length + 2, endRowIndex: rows.length + 3 },
+            cell: { userEnteredFormat: { textFormat: { bold: true } } },
+            fields: "userEnteredFormat(textFormat)",
+          },
+        },
+        { autoResizeDimensions: { dimensions: { sheetId: tabSheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 7 } } },
+      ],
+    }),
   });
 
   return `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
@@ -1511,9 +1573,9 @@ function Exportar({ shifts, hospitals }) {
         {/* Status messages */}
         {status === "success" && sheetsUrl && (
           <div className="export-status success">
-            ✅ Planilha criada com sucesso!{" "}
+            ✅ Aba atualizada com sucesso!{" "}
             <a href={sheetsUrl} target="_blank" rel="noopener noreferrer" className="export-link">
-              Abrir no Google Sheets →
+              Abrir planilha no Google Sheets →
             </a>
           </div>
         )}
@@ -1530,8 +1592,8 @@ function Exportar({ shifts, hospitals }) {
       {/* Info */}
       {hasClientId && (
         <div style={{ fontSize: 11, color: "var(--text3)", textAlign: "center", marginTop: 12, lineHeight: 1.7 }}>
-          A planilha é criada no seu Google Drive com formatação automática.<br />
-          Cada exportação gera uma planilha nova (não sobrescreve).
+          Todos os meses ficam numa planilha única <strong style={{color:"var(--text2)"}}>🩺 Plantões</strong> no seu Drive.<br />
+          Cada mês vira uma aba separada. Exportar de novo atualiza a aba existente.
         </div>
       )}
     </div>
