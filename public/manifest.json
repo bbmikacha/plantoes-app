@@ -1,7 +1,7 @@
 {
-  "name": "Plantões",
-  "short_name": "Plantões",
-  "description": "Controle financeiro de plantões",
+ "name": "🌱 MikaPlantões",
+"short_name": " 🌱 MikaPlantões",
+  "description": "Controle financeiro de plantões e plantinhos por Bruna Mikahil",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",
