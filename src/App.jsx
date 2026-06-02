@@ -104,7 +104,7 @@ function googleCalendarUrl(title, dateIso, description) {
 //   3. Crie credenciais OAuth 2.0 → Aplicativo da Web
 //   4. Em "Origens JS autorizadas" coloque a URL onde roda esse app
 //   5. Cole o Client ID abaixo
-const GOOGLE_CLIENT_ID = ""; // ← cole seu Client ID aqui
+const GOOGLE_CLIENT_ID = "954449084376-dl0s0phihikuepcj47f8us18i0o1m4ug.apps.googleusercontent.com"; // ← cole seu Client ID aqui
 
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file";
 
