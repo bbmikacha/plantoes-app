@@ -6,7 +6,7 @@ const WEEKDAYS = ["domingo","segunda","terça","quarta","quinta","sexta","sábad
 
 function isWeekend(dateStr) {
   const d = new Date(dateStr + "T12:00:00");
-  const day = d.getDay();
+  const day = d.getDay()
   return day === 0 || day === 6;
 }
 
@@ -131,40 +131,29 @@ function loginWithGoogle() {
       reject(new Error("CLIENT_ID_MISSING"));
       return;
     }
-    const redirectUri = (window.location.origin + window.location.pathname).replace(/\/$/, "");
-    const state = Math.random().toString(36).slice(2);
-    sessionStorage.setItem("gsheets_oauth_state", state);
-    const params = new URLSearchParams({
+
+    if (!window.google) {
+      reject(new Error("A biblioteca do Google não foi carregada. Verifique o index.html."));
+      return;
+    }
+
+    const client = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      redirect_uri: redirectUri,
-      response_type: "token",
       scope: SCOPES,
-      state,
-      prompt: "select_account",
-    });
-    const popup = window.open(
-      `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
-      "google_oauth",
-      "width=520,height=620,left=200,top=100"
-    );
-    const timer = setInterval(() => {
-      try {
-        if (!popup || popup.closed) { clearInterval(timer); reject(new Error("Popup fechado")); return; }
-        const url = popup.location.href;
-        if (url.includes(redirectUri)) {
-          popup.close();
-          clearInterval(timer);
-          const hash = new URLSearchParams(url.split("#")[1] || "");
-          const token = hash.get("access_token");
-          const expiresIn = Number(hash.get("expires_in") || 3600);
-          const retState = hash.get("state");
-          if (!token) { reject(new Error("Token não recebido")); return; }
-          if (retState !== sessionStorage.getItem("gsheets_oauth_state")) { reject(new Error("State inválido")); return; }
-          saveGoogleToken(token, expiresIn);
-          resolve(token);
+      callback: (tokenResponse) => {
+        if (tokenResponse && tokenResponse.access_token) {
+          saveGoogleToken(tokenResponse.access_token, tokenResponse.expires_in || 3600);
+          resolve(tokenResponse.access_token);
+        } else {
+          reject(new Error("Falha ao obter o token de acesso."));
         }
-      } catch (_) { /* cross-origin, aguardar */ }
-    }, 300);
+      },
+      error_callback: (error) => {
+        reject(new Error("Popup fechado ou erro de autenticação."));
+      }
+    });
+
+    client.requestAccessToken();
   });
 }
 
