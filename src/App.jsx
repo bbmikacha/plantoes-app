@@ -6,7 +6,7 @@ const WEEKDAYS = ["domingo","segunda","terça","quarta","quinta","sexta","sábad
 
 function isWeekend(dateStr) {
   const d = new Date(dateStr + "T12:00:00");
-  const day = d.getDay()
+  const day = d.getDay();
   return day === 0 || day === 6;
 }
 
@@ -131,29 +131,40 @@ function loginWithGoogle() {
       reject(new Error("CLIENT_ID_MISSING"));
       return;
     }
-
-    if (!window.google) {
-      reject(new Error("A biblioteca do Google não foi carregada. Verifique o index.html."));
-      return;
-    }
-
-    const client = window.google.accounts.oauth2.initTokenClient({
+    const redirectUri = (window.location.origin + window.location.pathname).replace(/\/$/, "");
+    const state = Math.random().toString(36).slice(2);
+    sessionStorage.setItem("gsheets_oauth_state", state);
+    const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: redirectUri,
+      response_type: "token",
       scope: SCOPES,
-      callback: (tokenResponse) => {
-        if (tokenResponse && tokenResponse.access_token) {
-          saveGoogleToken(tokenResponse.access_token, tokenResponse.expires_in || 3600);
-          resolve(tokenResponse.access_token);
-        } else {
-          reject(new Error("Falha ao obter o token de acesso."));
-        }
-      },
-      error_callback: (error) => {
-        reject(new Error("Popup fechado ou erro de autenticação."));
-      }
+      state,
+      prompt: "select_account",
     });
-
-    client.requestAccessToken();
+    const popup = window.open(
+      `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
+      "google_oauth",
+      "width=520,height=620,left=200,top=100"
+    );
+    const timer = setInterval(() => {
+      try {
+        if (!popup || popup.closed) { clearInterval(timer); reject(new Error("Popup fechado")); return; }
+        const url = popup.location.href;
+        if (url.includes(redirectUri)) {
+          popup.close();
+          clearInterval(timer);
+          const hash = new URLSearchParams(url.split("#")[1] || "");
+          const token = hash.get("access_token");
+          const expiresIn = Number(hash.get("expires_in") || 3600);
+          const retState = hash.get("state");
+          if (!token) { reject(new Error("Token não recebido")); return; }
+          if (retState !== sessionStorage.getItem("gsheets_oauth_state")) { reject(new Error("State inválido")); return; }
+          saveGoogleToken(token, expiresIn);
+          resolve(token);
+        }
+      } catch (_) { /* cross-origin, aguardar */ }
+    }, 300);
   });
 }
 
@@ -463,6 +474,7 @@ const styles = `
     padding: 20px 24px 0;
     border-bottom: 1px solid var(--border);
     padding-bottom: 0;
+    overflow-x: auto;
   }
   .nav-btn {
     font-family: 'Syne', sans-serif;
@@ -477,6 +489,7 @@ const styles = `
     transition: all 0.2s;
     border-radius: 8px 8px 0 0;
     letter-spacing: 0.3px;
+    white-space: nowrap;
   }
   .nav-btn:hover { color: var(--text2); }
   .nav-btn.active {
@@ -821,6 +834,56 @@ const styles = `
   .shifts-list { display: flex; flex-direction: column; gap: 8px; }
   .text-red { color: var(--red); }
   .received-check { color: var(--green); font-size: 16px; }
+
+  /* Calendar */
+  .calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 6px;
+  }
+  .calendar-weekday {
+    font-size: 10px;
+    color: var(--text3);
+    text-align: center;
+    padding-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+  .calendar-cell {
+    min-height: 78px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 6px;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    overflow: hidden;
+  }
+  .calendar-cell:hover { border-color: var(--accent); }
+  .calendar-cell.outside { opacity: 0.3; cursor: default; }
+  .calendar-cell.outside:hover { border-color: var(--border); }
+  .calendar-cell.today { border-color: var(--accent); background: rgba(124,106,247,0.08); }
+  .calendar-daynum { font-size: 11px; color: var(--text3); font-weight: 600; }
+  .calendar-cell.today .calendar-daynum { color: var(--accent); }
+  .calendar-shift-chip {
+    font-size: 10px;
+    padding: 2px 5px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .calendar-shift-chip:hover { filter: brightness(1.2); }
+  @media (max-width: 600px) {
+    .calendar-cell { min-height: 58px; padding: 4px; }
+    .calendar-shift-chip span:nth-child(2) { display: none; }
+  }
 `;
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -860,6 +923,7 @@ export default function App() {
   });
   const [showAddShift, setShowAddShift] = useState(false);
   const [editShift, setEditShift] = useState(null);
+  const [newShiftDate, setNewShiftDate] = useState(null);
 
   useEffect(() => {
     localStorage.setItem("hospitals", JSON.stringify(hospitals));
@@ -873,20 +937,23 @@ export default function App() {
     setShifts((s) => s.map((sh) => sh.id === shiftId ? { ...sh, received: !sh.received } : sh));
   };
 
+  const closeModal = () => { setShowAddShift(false); setEditShift(null); setNewShiftDate(null); };
+
   return (
     <>
       <style>{styles}</style>
       <div className="app">
         <div className="header">
           <div>
-            <div className="header-title">🌱 MikaPlantões</div>
-            <div className="header-sub">seu controle financeiro de plantões</div>
+            <div className="header-title">🌱 MikaPlant</div>
+            <div className="header-sub">babies and money</div>
           </div>
         </div>
 
         <nav className="nav">
           {[
             { id: "dashboard", label: "📊 Dashboard" },
+            { id: "calendario", label: "🗓️ Calendário" },
             { id: "hospitais", label: "🏥 Hospitais" },
             { id: "historico", label: "📋 Histórico" },
             { id: "exportar", label: "📤 Exportar" },
@@ -899,6 +966,15 @@ export default function App() {
 
         <div className="content">
           {tab === "dashboard" && <Dashboard shifts={shifts} hospitals={hospitals} onMark={markReceived} hospital={hospital} />}
+          {tab === "calendario" && (
+            <Calendario
+              shifts={shifts}
+              hospitals={hospitals}
+              hospital={hospital}
+              onEdit={setEditShift}
+              onDayClick={setNewShiftDate}
+            />
+          )}
           {tab === "hospitais" && <Hospitais hospitals={hospitals} setHospitals={setHospitals} />}
           {tab === "historico" && (
             <Historico shifts={shifts} setShifts={setShifts} hospital={hospital} onEdit={setEditShift} onMark={markReceived} />
@@ -907,25 +983,25 @@ export default function App() {
         </div>
       </div>
 
-      {(tab === "dashboard" || tab === "historico") && (
+      {(tab === "dashboard" || tab === "historico" || tab === "calendario") && (
         <button className="fab" onClick={() => setShowAddShift(true)}>
           <span>＋</span> Registrar Plantão
         </button>
       )}
 
-      {(showAddShift || editShift) && (
+      {(showAddShift || editShift || newShiftDate) && (
         <ShiftModal
           hospitals={hospitals}
           editData={editShift}
-          onClose={() => { setShowAddShift(false); setEditShift(null); }}
+          initialDate={newShiftDate}
+          onClose={closeModal}
           onSave={(data) => {
             if (editShift) {
               setShifts((s) => s.map((sh) => sh.id === editShift.id ? { ...sh, ...data } : sh));
             } else {
               setShifts((s) => [...s, { ...data, id: Date.now().toString(), received: false }]);
             }
-            setShowAddShift(false);
-            setEditShift(null);
+            closeModal();
           }}
         />
       )}
@@ -939,80 +1015,147 @@ function Dashboard({ shifts, hospitals, onMark, hospital }) {
   const now = new Date();
   const thisMonth = now.getMonth();
   const thisYear = now.getFullYear();
+  const [selYear, setSelYear] = useState(thisYear);
+  const [selMonth, setSelMonth] = useState(thisMonth);
 
-  const monthShifts = shifts.filter((sh) => {
+  const monthNames = Array.from({ length: 12 }, (_, i) =>
+    new Date(2024, i, 1).toLocaleDateString("pt-BR", { month: "long" })
+  );
+
+  // Plantões FEITOS no mês selecionado
+  const workedShifts = shifts.filter((sh) => {
     const d = new Date(sh.date + "T12:00:00");
-    return d.getMonth() === thisMonth && d.getFullYear() === thisYear;
+    return d.getMonth() === selMonth && d.getFullYear() === selYear;
   });
+  const workedTotal = workedShifts.reduce((a, sh) => a + (sh.value || 0), 0);
 
-  const monthTotal = monthShifts.reduce((a, sh) => a + (sh.value || 0), 0);
+  // Pagamentos que CAEM no mês selecionado
+  const incomingShifts = shifts.filter((sh) => {
+    const h = hospital(sh.hospitalId);
+    if (!h) return false;
+    const payDate = calcPaymentDate(sh.date, h);
+    return payDate.getMonth() === selMonth && payDate.getFullYear() === selYear;
+  });
+  const incomingTotal = incomingShifts.reduce((a, sh) => a + (sh.value || 0), 0);
+  const incomingReceived = incomingShifts.filter(sh => sh.received).reduce((a, sh) => a + (sh.value || 0), 0);
+  const incomingPending = incomingTotal - incomingReceived;
+
+  // Pendentes globais e atrasados
   const pending = shifts.filter((sh) => !sh.received);
   const pendingTotal = pending.reduce((a, sh) => a + (sh.value || 0), 0);
-
   const overdueShifts = pending.filter((sh) => {
-    const payDate = calcPaymentDate(sh.date, hospital(sh.hospitalId) || {});
-    return payDateStr(payDate) < today();
+    const h = hospital(sh.hospitalId);
+    if (!h) return false;
+    return payDateStr(calcPaymentDate(sh.date, h)) < today();
   });
 
-  // Monthly chart: last 6 months
-  const months = [];
+  // Gráfico: últimos 6 meses — trabalhado vs recebido
+  const chartMonths = [];
   for (let i = 5; i >= 0; i--) {
     const d = new Date(thisYear, thisMonth - i, 1);
-    months.push({ year: d.getFullYear(), month: d.getMonth() });
+    chartMonths.push({ year: d.getFullYear(), month: d.getMonth() });
   }
-  const chartData = months.map(({ year, month }) => {
-    const total = shifts.filter((sh) => {
+  const chartData = chartMonths.map(({ year, month }) => {
+    const worked = shifts.filter((sh) => {
       const d = new Date(sh.date + "T12:00:00");
       return d.getFullYear() === year && d.getMonth() === month;
     }).reduce((a, sh) => a + (sh.value || 0), 0);
+    const incoming = shifts.filter((sh) => {
+      const h = hospital(sh.hospitalId);
+      if (!h) return false;
+      const payDate = calcPaymentDate(sh.date, h);
+      return payDate.getFullYear() === year && payDate.getMonth() === month;
+    }).reduce((a, sh) => a + (sh.value || 0), 0);
     const d = new Date(year, month, 1);
-    return { label: d.toLocaleDateString("pt-BR", { month: "short" }), total };
+    return { label: d.toLocaleDateString("pt-BR", { month: "short" }), worked, incoming };
   });
-  const maxChart = Math.max(...chartData.map((d) => d.total), 1);
+  const maxChart = Math.max(...chartData.map((d) => Math.max(d.worked, d.incoming)), 1);
+
+  const isCurrentMonth = selMonth === thisMonth && selYear === thisYear;
 
   return (
     <div>
-      {/* Stats */}
-      <div className="card-grid">
-        <div className="stat-card">
-          <div className="stat-label">Mês atual</div>
-          <div className="stat-value">{fmtMoney(monthTotal)}</div>
-          <div className="stat-sub">{monthShifts.length} {monthShifts.length !== 1 ? "plantões" : "plantão"} em {new Date().toLocaleDateString("pt-BR", { month: "long" })}</div>
+      {/* Seletor de mês */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center" }}>
+        <button className="btn-icon" onClick={() => {
+          const d = new Date(selYear, selMonth - 1, 1);
+          setSelMonth(d.getMonth()); setSelYear(d.getFullYear());
+        }}>‹</button>
+        <div style={{ flex: 1, textAlign: "center" }}>
+          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 15 }}>
+            {monthNames[selMonth].charAt(0).toUpperCase() + monthNames[selMonth].slice(1)} {selYear}
+          </span>
+          {isCurrentMonth && <span style={{ fontSize: 10, color: "var(--accent)", marginLeft: 6, background: "rgba(124,106,247,0.15)", padding: "1px 6px", borderRadius: 99 }}>hoje</span>}
         </div>
-        <div className={`stat-card ${overdueShifts.length > 0 ? "red" : ""}`}>
-          <div className={`stat-label ${overdueShifts.length > 0 ? "red" : ""}`}>
-            {overdueShifts.length > 0 ? "Pagamento em atraso" : "Total a receber"}
+        <button className="btn-icon" onClick={() => {
+          const d = new Date(selYear, selMonth + 1, 1);
+          setSelMonth(d.getMonth()); setSelYear(d.getFullYear());
+        }}>›</button>
+      </div>
+
+      {/* 2 cards principais */}
+      <div className="card-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <div className="stat-card">
+          <div className="stat-label">💼 Trabalhei</div>
+          <div className="stat-value">{fmtMoney(workedTotal)}</div>
+          <div className="stat-sub">{workedShifts.length} {workedShifts.length !== 1 ? "plantões" : "plantão"} realizados</div>
+        </div>
+        <div className="stat-card" style={{ borderColor: incomingPending > 0 ? "rgba(124,106,247,0.4)" : "rgba(52,211,153,0.3)", background: incomingPending > 0 ? "rgba(124,106,247,0.06)" : "rgba(52,211,153,0.05)" }}>
+          <div className="stat-label" style={{ color: "var(--accent)" }}>💰 Recebo</div>
+          <div className="stat-value">{fmtMoney(incomingTotal)}</div>
+          <div className="stat-sub">
+            {incomingReceived > 0 && <span style={{ color: "var(--green)" }}>✓ {fmtMoney(incomingReceived)} recebido · </span>}
+            {incomingPending > 0
+              ? <span style={{ color: "var(--text3)" }}>{fmtMoney(incomingPending)} pendente</span>
+              : incomingTotal > 0 ? <span style={{ color: "var(--green)" }}>tudo recebido 🎉</span> : <span style={{ color: "var(--text3)" }}>nenhum pagamento</span>
+            }
           </div>
-          <div className="stat-value">{fmtMoney(pendingTotal)}</div>
-          <div className="stat-sub">{pending.length} {pending.length !== 1 ? "plantões" : "plantão"} pendente{pending.length !== 1 ? "s" : ""}</div>
         </div>
       </div>
 
-      {/* Chart */}
+      {/* Card total a receber global */}
+      <div className={`stat-card ${overdueShifts.length > 0 ? "red" : ""}`} style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div className={`stat-label ${overdueShifts.length > 0 ? "red" : ""}`}>
+              {overdueShifts.length > 0 ? "⚠️ Total em aberto (com atrasos)" : "📋 Total em aberto"}
+            </div>
+            <div className="stat-value">{fmtMoney(pendingTotal)}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div className="stat-sub">{pending.length} {pending.length !== 1 ? "plantões" : "plantão"} pendente{pending.length !== 1 ? "s" : ""}</div>
+            {overdueShifts.length > 0 && <div className="stat-sub" style={{ color: "var(--red)" }}>{overdueShifts.length} em atraso</div>}
+          </div>
+        </div>
+      </div>
+
+      {/* Gráfico */}
       <div className="card" style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 12, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 10 }}>Evolução mensal</div>
-        <div className="chart-bars">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontSize: 12, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.8px" }}>Últimos 6 meses</div>
+          <div style={{ display: "flex", gap: 12, fontSize: 10, color: "var(--text3)" }}>
+            <span><span style={{ color: "var(--accent)" }}>■</span> Trabalhei</span>
+            <span><span style={{ color: "var(--green)" }}>■</span> Recebi</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 80 }}>
           {chartData.map((d, i) => (
             <div key={i} className="chart-bar-wrap">
-              <div className="chart-bar-value">{d.total > 0 ? `${(d.total / 1000).toFixed(0)}k` : ""}</div>
-              <div
-                className="chart-bar"
-                style={{ height: `${(d.total / maxChart) * 60}px` }}
-                title={fmtMoney(d.total)}
-              />
+              <div style={{ display: "flex", gap: 2, alignItems: "flex-end", height: 60 }}>
+                <div style={{ width: "100%", borderRadius: "3px 3px 0 0", background: "rgba(124,106,247,0.5)", height: `${(d.worked / maxChart) * 60}px`, minHeight: d.worked > 0 ? 3 : 0, transition: "height 0.4s" }} title={`Trabalhei: ${fmtMoney(d.worked)}`} />
+                <div style={{ width: "100%", borderRadius: "3px 3px 0 0", background: "rgba(52,211,153,0.6)", height: `${(d.incoming / maxChart) * 60}px`, minHeight: d.incoming > 0 ? 3 : 0, transition: "height 0.4s" }} title={`Recebi: ${fmtMoney(d.incoming)}`} />
+              </div>
               <div className="chart-bar-label">{d.label}</div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Pending payments */}
+      {/* Pendentes */}
       <div className="section-header">
         <div className="section-title">
           ⏳ Pagamentos pendentes
-          {overdueShifts.length > 0 && (
-            <span className="section-badge">· {overdueShifts.length} em atraso</span>
-          )}
+          {overdueShifts.length > 0 && <span className="section-badge">· {overdueShifts.length} em atraso</span>}
         </div>
       </div>
 
@@ -1020,7 +1163,7 @@ function Dashboard({ shifts, hospitals, onMark, hospital }) {
         <div className="empty"><div className="empty-icon">🎉</div>Todos os pagamentos confirmados!</div>
       ) : (
         <div className="shifts-list">
-          {pending
+          {[...pending].sort((a, b) => a.date.localeCompare(b.date))
             .map((sh) => {
               const h = hospitals.find((x) => x.id === sh.hospitalId);
               if (!h) return null;
@@ -1038,7 +1181,7 @@ function Dashboard({ shifts, hospitals, onMark, hospital }) {
               const gcUrl = googleCalendarUrl(gcTitle, payIso, gcDesc);
 
               return (
-                <div key={sh.id} className={`shift-item ${overdue ? "" : ""}`}>
+                <div key={sh.id} className="shift-item">
                   <div className="shift-dot" style={{ background: h.color }} />
                   <div className="shift-info">
                     <div className="shift-name" style={{ color: h.color }}>{h.emoji} {h.name}</div>
@@ -1058,6 +1201,119 @@ function Dashboard({ shifts, hospitals, onMark, hospital }) {
             })}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Calendário ────────────────────────────────────────────────────────────────
+
+function Calendario({ shifts, hospitals, hospital, onEdit, onDayClick }) {
+  const now = new Date();
+  const [selYear, setSelYear] = useState(now.getFullYear());
+  const [selMonth, setSelMonth] = useState(now.getMonth());
+
+  const monthNames = Array.from({ length: 12 }, (_, i) =>
+    new Date(2024, i, 1).toLocaleDateString("pt-BR", { month: "long" })
+  );
+
+  const firstOfMonth = new Date(selYear, selMonth, 1);
+  const startWeekday = firstOfMonth.getDay(); // 0 = domingo
+  const daysInMonth = new Date(selYear, selMonth + 1, 0).getDate();
+  const daysInPrevMonth = new Date(selYear, selMonth, 0).getDate();
+
+  const shiftsByDate = useMemo(() => {
+    const map = {};
+    shifts.forEach((sh) => {
+      if (!map[sh.date]) map[sh.date] = [];
+      map[sh.date].push(sh);
+    });
+    return map;
+  }, [shifts]);
+
+  const monthShifts = shifts.filter((sh) => {
+    const d = new Date(sh.date + "T12:00:00");
+    return d.getFullYear() === selYear && d.getMonth() === selMonth;
+  });
+  const monthTotal = monthShifts.reduce((a, sh) => a + (sh.value || 0), 0);
+
+  const todayIso = today();
+
+  // Monta as células do grid (dias do mês anterior/seguinte para completar as semanas)
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) {
+    cells.push({ outside: true, dayNum: daysInPrevMonth - startWeekday + 1 + i, dateIso: null });
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateIso = `${selYear}-${String(selMonth + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    cells.push({ outside: false, dayNum: d, dateIso });
+  }
+  let nextDay = 1;
+  while (cells.length % 7 !== 0) {
+    cells.push({ outside: true, dayNum: nextDay++, dateIso: null });
+  }
+
+  return (
+    <div>
+      {/* Seletor de mês */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center" }}>
+        <button className="btn-icon" onClick={() => {
+          const d = new Date(selYear, selMonth - 1, 1);
+          setSelMonth(d.getMonth()); setSelYear(d.getFullYear());
+        }}>‹</button>
+        <div style={{ flex: 1, textAlign: "center" }}>
+          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 15 }}>
+            {monthNames[selMonth].charAt(0).toUpperCase() + monthNames[selMonth].slice(1)} {selYear}
+          </span>
+          <span style={{ fontSize: 11, color: "var(--green)", marginLeft: 8, fontFamily: "'Syne', sans-serif", fontWeight: 700 }}>
+            {fmtMoney(monthTotal)}
+          </span>
+        </div>
+        <button className="btn-icon" onClick={() => {
+          const d = new Date(selYear, selMonth + 1, 1);
+          setSelMonth(d.getMonth()); setSelYear(d.getFullYear());
+        }}>›</button>
+      </div>
+
+      <div className="calendar-grid">
+        {WEEKDAYS.map((w) => (
+          <div key={w} className="calendar-weekday">{w.slice(0, 3)}</div>
+        ))}
+        {cells.map((cell, i) => {
+          const isToday = cell.dateIso === todayIso;
+          const dayShifts = cell.dateIso ? (shiftsByDate[cell.dateIso] || []) : [];
+          return (
+            <div
+              key={i}
+              className={`calendar-cell ${cell.outside ? "outside" : ""} ${isToday ? "today" : ""}`}
+              onClick={() => { if (cell.dateIso) onDayClick(cell.dateIso); }}
+              title={cell.dateIso ? "Clique para registrar um plantão nesse dia" : ""}
+            >
+              <div className="calendar-daynum">{cell.dayNum}</div>
+              {dayShifts.map((sh) => {
+                const h = hospital(sh.hospitalId);
+                if (!h) return null;
+                return (
+                  <div
+                    key={sh.id}
+                    className="calendar-shift-chip"
+                    style={{ background: h.color + "22", color: h.color, border: `1px solid ${h.color}44` }}
+                    title={`${h.emoji} ${h.name} · ${fmtMoney(sh.value)}${sh.received ? " · recebido" : " · pendente"} — clique para editar`}
+                    onClick={(e) => { e.stopPropagation(); onEdit(sh); }}
+                  >
+                    <span>{h.emoji}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fmtMoney(sh.value)}</span>
+                    {sh.received && <span>✓</span>}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--text3)", textAlign: "center", marginTop: 16, lineHeight: 1.6 }}>
+        Clique num dia vazio para registrar um plantão · clique num plantão existente para editar
+      </div>
     </div>
   );
 }
@@ -1591,8 +1847,8 @@ function Exportar({ shifts, hospitals }) {
 
 // ─── Modal de Plantão ─────────────────────────────────────────────────────────
 
-function ShiftModal({ hospitals, editData, onClose, onSave }) {
-  const [date, setDate] = useState(editData?.date || today());
+function ShiftModal({ hospitals, editData, initialDate, onClose, onSave }) {
+  const [date, setDate] = useState(editData?.date || initialDate || today());
   const [hospitalId, setHospitalId] = useState(editData?.hospitalId || hospitals[0]?.id || "");
   const [hours, setHours] = useState(editData?.hours ?? SHIFT_HOURS);
 
