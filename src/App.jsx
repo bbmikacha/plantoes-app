@@ -63,8 +63,62 @@ function fmtMoney(v) {
   return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v);
 }
 
+// Retorna o valor formatado, ou mascarado se o modo privacidade estiver ativo
+function money(v, hidden) {
+  return hidden ? "R$ ••••••" : fmtMoney(v);
+}
+
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// ─── Repetição de plantões ───────────────────────────────────────────────────
+
+const ORDINALS = ["1º", "2º", "3º", "4º", "5º"];
+
+function addDaysIso(dateIso, days) {
+  const d = new Date(dateIso + "T12:00:00");
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Encontra a data do N-ésimo dia-da-semana de um mês (ex: 2º domingo). Retorna null se o mês não tiver essa ocorrência.
+function nthWeekdayOfMonth(year, month, weekday, nth) {
+  const first = new Date(year, month, 1);
+  const firstWeekday = first.getDay();
+  const day = 1 + ((weekday - firstWeekday + 7) % 7) + (nth - 1) * 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  if (day > daysInMonth) return null;
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+// Gera a lista de datas (ISO) para um plantão recorrente, incluindo a data inicial.
+function generateRepeatDates(startIso, repeatType, repeatInterval, repeatCount) {
+  const dates = [startIso];
+  const count = Math.max(1, Number(repeatCount) || 1);
+
+  if (repeatType === "interval") {
+    const step = Math.max(1, Number(repeatInterval) || 1);
+    for (let i = 1; i < count; i++) dates.push(addDaysIso(startIso, step * i));
+  } else if (repeatType === "weekly") {
+    for (let i = 1; i < count; i++) dates.push(addDaysIso(startIso, 7 * i));
+  } else if (repeatType === "monthly_weekday") {
+    const d0 = new Date(startIso + "T12:00:00");
+    const weekday = d0.getDay();
+    const nth = Math.ceil(d0.getDate() / 7);
+    let year = d0.getFullYear();
+    let month = d0.getMonth();
+    let found = 1;
+    let safety = 0;
+    while (found < count && safety < 60) {
+      safety++;
+      month++;
+      if (month > 11) { month = 0; year++; }
+      const dt = nthWeekdayOfMonth(year, month, weekday, nth);
+      if (dt) { dates.push(dt); found++; }
+    }
+  }
+  return dates;
 }
 
 function monthLabel(year, month) {
@@ -661,27 +715,6 @@ const styles = `
     font-weight: 600;
   }
 
-  /* Chart */
-  .chart-bars {
-    display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    height: 80px;
-    padding: 8px 0 0;
-  }
-  .chart-bar-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; }
-  .chart-bar {
-    width: 100%;
-    border-radius: 4px 4px 0 0;
-    background: linear-gradient(180deg, #7c6af7, #6c5ce7);
-    transition: height 0.4s cubic-bezier(.34,1.56,.64,1);
-    min-height: 3px;
-    cursor: pointer;
-  }
-  .chart-bar:hover { background: linear-gradient(180deg, #9f92f9, #7c6af7); }
-  .chart-bar-label { font-size: 10px; color: var(--text3); }
-  .chart-bar-value { font-size: 10px; color: var(--text2); font-weight: 500; }
-
   /* Modal */
   .modal-overlay {
     position: fixed; inset: 0;
@@ -880,9 +913,59 @@ const styles = `
     font-weight: 600;
   }
   .calendar-shift-chip:hover { filter: brightness(1.2); }
+
+  /* ─── Responsivo (celular) ─────────────────────────────────────────────── */
   @media (max-width: 600px) {
-    .calendar-cell { min-height: 58px; padding: 4px; }
+    body { font-size: 13px; }
+    .app { padding-bottom: 90px; }
+
+    .header { padding: 18px 16px 0; }
+    .header-title { font-size: 19px; }
+    .header-sub { font-size: 11px; }
+
+    .nav { padding: 14px 12px 0; gap: 2px; }
+    .nav-btn { padding: 9px 11px; font-size: 12px; }
+
+    .content { padding: 14px; }
+
+    .card, .stat-card, .hospital-card { padding: 14px; border-radius: 12px; }
+    .card-grid { grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+    .stat-value { font-size: 18px; }
+    .stat-label { font-size: 10px; }
+    .stat-sub { font-size: 10px; }
+
+    .section-header { margin-top: 16px; margin-bottom: 10px; }
+    .section-title { font-size: 14px; }
+
+    .shift-item { padding: 10px; gap: 8px; flex-wrap: wrap; }
+    .shift-name { font-size: 12px; }
+    .shift-meta { font-size: 10px; }
+    .shift-value { font-size: 13px; }
+    .shift-actions { gap: 4px; }
+    .btn-icon { width: 27px; height: 27px; font-size: 12px; }
+
+    .hospital-card { gap: 10px; flex-wrap: wrap; }
+    .hospital-dot { width: 34px; height: 34px; font-size: 17px; }
+    .hospital-name { font-size: 13px; }
+    .hospital-detail { font-size: 11px; }
+
+    .modal { padding: 18px; border-radius: 14px; max-width: 100%; }
+    .modal-title { font-size: 15px; margin-bottom: 14px; }
+    .modal-overlay { padding: 10px; align-items: flex-end; }
+    .modal { max-height: 92vh; overflow-y: auto; }
+
+    .fab { bottom: 16px; right: 16px; padding: 12px 18px; font-size: 13px; }
+
+    .calendar-cell { min-height: 52px; padding: 4px; border-radius: 8px; }
+    .calendar-weekday { font-size: 9px; }
+    .calendar-daynum { font-size: 10px; }
+    .calendar-shift-chip { font-size: 9px; padding: 1px 4px; }
     .calendar-shift-chip span:nth-child(2) { display: none; }
+    .calendar-grid { gap: 4px; }
+  }
+
+  @media (max-width: 380px) {
+    .card-grid { grid-template-columns: 1fr; }
   }
 `;
 
@@ -945,8 +1028,8 @@ export default function App() {
       <div className="app">
         <div className="header">
           <div>
-            <div className="header-title">🌱 MikaPlant</div>
-            <div className="header-sub">babies and money</div>
+            <div className="header-title">🌱 MikaPlantões</div>
+            <div className="header-sub">seu controle financeiro de plantões</div>
           </div>
         </div>
 
@@ -1049,28 +1132,6 @@ function Dashboard({ shifts, hospitals, onMark, hospital }) {
     return payDateStr(calcPaymentDate(sh.date, h)) < today();
   });
 
-  // Gráfico: últimos 6 meses — trabalhado vs recebido
-  const chartMonths = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(thisYear, thisMonth - i, 1);
-    chartMonths.push({ year: d.getFullYear(), month: d.getMonth() });
-  }
-  const chartData = chartMonths.map(({ year, month }) => {
-    const worked = shifts.filter((sh) => {
-      const d = new Date(sh.date + "T12:00:00");
-      return d.getFullYear() === year && d.getMonth() === month;
-    }).reduce((a, sh) => a + (sh.value || 0), 0);
-    const incoming = shifts.filter((sh) => {
-      const h = hospital(sh.hospitalId);
-      if (!h) return false;
-      const payDate = calcPaymentDate(sh.date, h);
-      return payDate.getFullYear() === year && payDate.getMonth() === month;
-    }).reduce((a, sh) => a + (sh.value || 0), 0);
-    const d = new Date(year, month, 1);
-    return { label: d.toLocaleDateString("pt-BR", { month: "short" }), worked, incoming };
-  });
-  const maxChart = Math.max(...chartData.map((d) => Math.max(d.worked, d.incoming)), 1);
-
   const isCurrentMonth = selMonth === thisMonth && selYear === thisYear;
 
   return (
@@ -1126,28 +1187,6 @@ function Dashboard({ shifts, hospitals, onMark, hospital }) {
             <div className="stat-sub">{pending.length} {pending.length !== 1 ? "plantões" : "plantão"} pendente{pending.length !== 1 ? "s" : ""}</div>
             {overdueShifts.length > 0 && <div className="stat-sub" style={{ color: "var(--red)" }}>{overdueShifts.length} em atraso</div>}
           </div>
-        </div>
-      </div>
-
-      {/* Gráfico */}
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <div style={{ fontSize: 12, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.8px" }}>Últimos 6 meses</div>
-          <div style={{ display: "flex", gap: 12, fontSize: 10, color: "var(--text3)" }}>
-            <span><span style={{ color: "var(--accent)" }}>■</span> Trabalhei</span>
-            <span><span style={{ color: "var(--green)" }}>■</span> Recebi</span>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 80 }}>
-          {chartData.map((d, i) => (
-            <div key={i} className="chart-bar-wrap">
-              <div style={{ display: "flex", gap: 2, alignItems: "flex-end", height: 60 }}>
-                <div style={{ width: "100%", borderRadius: "3px 3px 0 0", background: "rgba(124,106,247,0.5)", height: `${(d.worked / maxChart) * 60}px`, minHeight: d.worked > 0 ? 3 : 0, transition: "height 0.4s" }} title={`Trabalhei: ${fmtMoney(d.worked)}`} />
-                <div style={{ width: "100%", borderRadius: "3px 3px 0 0", background: "rgba(52,211,153,0.6)", height: `${(d.incoming / maxChart) * 60}px`, minHeight: d.incoming > 0 ? 3 : 0, transition: "height 0.4s" }} title={`Recebi: ${fmtMoney(d.incoming)}`} />
-              </div>
-              <div className="chart-bar-label">{d.label}</div>
-            </div>
-          ))}
         </div>
       </div>
 
@@ -1478,7 +1517,7 @@ function HospitalModal({ initial, onClose, onSave }) {
   );
 }
 
-function Hospitais({ hospitals, setHospitals }) {
+function Hospitais({ hospitals, setHospitals, hideValues }) {
   const [editingHospital, setEditingHospital] = useState(null); // null | "new" | hospital obj
   const [confirmDelete, setConfirmDelete] = useState(null);
 
@@ -1497,6 +1536,16 @@ function Hospitais({ hospitals, setHospitals }) {
     setConfirmDelete(null);
   }
 
+  function moveHospital(index, dir) {
+    setHospitals(prev => {
+      const newIndex = index + dir;
+      if (newIndex < 0 || newIndex >= prev.length) return prev;
+      const arr = [...prev];
+      [arr[index], arr[newIndex]] = [arr[newIndex], arr[index]];
+      return arr;
+    });
+  }
+
   return (
     <div>
       <div className="section-header" style={{ marginTop: 0 }}>
@@ -1505,10 +1554,29 @@ function Hospitais({ hospitals, setHospitals }) {
           ＋ Novo
         </button>
       </div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 12 }}>
+        Use ▲ ▼ para reordenar como os hospitais aparecem nas listas.
+      </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {hospitals.map((h) => (
+        {hospitals.map((h, i) => (
           <div key={h.id} className="hospital-card">
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <button
+                className="btn-icon"
+                style={{ width: 22, height: 18, fontSize: 10 }}
+                disabled={i === 0}
+                onClick={() => moveHospital(i, -1)}
+                title="Mover para cima"
+              >▲</button>
+              <button
+                className="btn-icon"
+                style={{ width: 22, height: 18, fontSize: 10 }}
+                disabled={i === hospitals.length - 1}
+                onClick={() => moveHospital(i, 1)}
+                title="Mover para baixo"
+              >▼</button>
+            </div>
             <div className="hospital-dot" style={{ background: h.color + "22", border: `1.5px solid ${h.color}44` }}>
               {h.emoji}
             </div>
@@ -1518,11 +1586,11 @@ function Hospitais({ hospitals, setHospitals }) {
             </div>
             <div className="hospital-values" style={{ marginRight: 8 }}>
               {h.value === h.valueWeekend || !h.valueWeekend ? (
-                <div className="hospital-val">{fmtMoney(h.value)}</div>
+                <div className="hospital-val">{money(h.value, hideValues)}</div>
               ) : (
                 <>
-                  <div className="hospital-val">{fmtMoney(h.value)}</div>
-                  <div className="hospital-val-sub">FDS: {fmtMoney(h.valueWeekend)}</div>
+                  <div className="hospital-val">{money(h.value, hideValues)}</div>
+                  <div className="hospital-val-sub">FDS: {money(h.valueWeekend, hideValues)}</div>
                 </>
               )}
             </div>
